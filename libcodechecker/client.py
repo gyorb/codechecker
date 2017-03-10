@@ -19,7 +19,6 @@ from thrift.transport import TTransport
 
 import shared
 from DBThriftAPI import CheckerReport
-from DBThriftAPI.ttypes import SuppressBugData
 
 from libcodechecker import suppress_file_handler
 from libcodechecker.logger import LoggerFactory
@@ -34,7 +33,7 @@ def clean_suppress(connection, run_id):
     """
     Clean all the suppress information from the database.
     """
-    connection.clean_suppress_data(run_id)
+    connection.unsuppressReport(report_id)
 
 
 # -----------------------------------------------------------------------------
@@ -112,85 +111,70 @@ class Connection(object):
         """ Close connection. """
         self._transport.close()
 
-    def add_checker_run(self, command, name, version, force):
-        run_id = self._client.addCheckerRun(command, name, version, force)
-        return run_id
+    def add_checker_run(self, *args, **kwargs):
+        return self._client.addCheckerRun(*args, **kwargs)
 
-    def finish_checker_run(self, run_id):
-        """ bool finishCheckerRun(1: i64 run_id) """
-        self._client.finishCheckerRun(run_id)
+    def finish_checker_run(self, *args, **kwargs):
+        return self._client.finishCheckerRun(*args, **kwargs)
 
-    def clean_suppress_data(self, run_id):
-        """
-        Clean suppress data.
-        """
-        self._client.cleanSuppressData(run_id)
+    def unsuppress_report(self, *args, **kwargs):
+        return self._client.unsuppressReport(*args, **kwargs)
 
-    def add_suppress_bug(self, run_id, suppress_data):
+    def suppress_reports(self, reports_to_suppress):
         """
         Process and send suppress data
         which should be sent to the report server.
         """
-        bugs_to_suppress = []
-        for checker_hash, file_name, comment in suppress_data:
-            comment = comment.encode('UTF-8')
-            suppress_bug = SuppressBugData(checker_hash,
-                                           file_name,
-                                           comment)
-            bugs_to_suppress.append(suppress_bug)
+        suppress_report_data = []
+        for hash, file_name, comment in reports_to_suppress:
+            srd = shared.ttypes.SuppressReportData(hash, file_name,
+                                                   comment.encode('UTF-8'),
+                                                   False)
+            suppress_report_data.append(srd)
 
-        return self._client.addSuppressBug(run_id,
-                                           bugs_to_suppress)
+        return self._client.suppressReport(suppress_report_data)
 
     def add_skip_paths(self, run_id, paths):
-        """ bool addSkipPath(1: i64 run_id, 2: map<string, string> paths) """
-        # convert before sending through thrift
+        """
+        Convert before sending through thrift.
+        """
         converted = {}
         for path, comment in paths.items():
             converted[path] = comment.encode('UTF-8')
         return self._client.addSkipPath(run_id, converted)
 
-    def replace_config_info(self, run_id, config_list):
-        ''' bool replaceConfigInfo(1: i64 run_id,
-                                   2: list<ConfigValue> values)
-        '''
-        return self._client.replaceConfigInfo(run_id, config_list)
+    def replace_config_info(self, *args, **kwargs):
+        return self._client.replaceConfigInfo(*args, **kwargs)
 
-    def add_build_action(self, run_id, build_cmd_hash, check_cmd,
-                         analyzer_type, analyzed_source_file):
-        """
-        i64  addBuildAction(1: i64 run_id, 2: string build_cmd,
-                            3: string check_cmd, 4: string analyzer_type,
-                            5: string analyzed_source_file)
-        """
-        return self._client.addBuildAction(run_id,
-                                           build_cmd_hash,
-                                           check_cmd,
-                                           analyzer_type,
-                                           analyzed_source_file)
+    def store_analysis_action(self, *args, **kwargs):
+        return self._client.storeAnalysisAction(*args, **kwargs)
 
-    def finish_build_action(self, action_id, failure):
-        """ bool finishBuildAction(1: i64 action_id, 2: string failure) """
-        return self._client.finishBuildAction(action_id, failure)
+    def store_compilation_action(self, *args, **kwargs):
+        return self._client.storeCompilationAction(*args, **kwargs)
 
-    def add_report(self, build_action_id, file_id, bug_hash,
-                   checker_message, bugpath, events, checker_id, checker_cat,
-                   bug_type, severity, suppress):
-        """  """
-        return self._client.addReport(build_action_id, file_id, bug_hash,
-                                      checker_message, bugpath,
-                                      events, checker_id, checker_cat,
-                                      bug_type, severity, suppress)
+    def finish_build_action(self, *args, **kwargs):
+        return self._client.finishBuildAction(*args, **kwargs)
 
-    def need_file_content(self, run_id, filepath):
-        """ NeedFileResult needFileContent(1: i64 run_id, 2: string filepath)
-        """
-        return self._client.needFileContent(run_id, filepath)
+    def add_report(self, *args, **kwargs):
+        return self._client.addReport(*args, **kwargs)
 
-    def add_file_content(self, file_id, file_content):
-        """ bool addFileContent(1: i64 file_id, 2: binary file_content) """
-        return self._client.addFileContent(file_id, file_content)
+    def add_report_comment(self, *args, **kwargs):
+        return self._client.storeReportComment(*args, **kwargs)
 
+    def add_tag_to_issue(self, *args, **kwargs):
+        return self._client.addTagToIssue(*args, **kwargs)
+
+    def add_to_run(self, *args, **kwargs):
+        return self._client.addToRun(*args, **kwargs)
+
+    def need_file_content(self, *args, **kwargs):
+        return self._client.needFileContent(*args, **kwargs)
+
+    def add_file_content(self, *args, **kwargs):
+        return self._client.addFileContent(*args, **kwargs)
+
+    def store_tag(self, *args, **kwargs):
+        return self._client.storeTag(*args, **kwargs)
 
 # -----------------------------------------------------------------------------
 class ConnectionManager(object):

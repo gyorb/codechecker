@@ -20,6 +20,8 @@ LOG = LoggerFactory.get_new_logger('PLIST_HELPER')
 
 
 def gen_bug_hash(bug):
+    # TODO hash generation based on diag sections ??
+
     line_content = linecache.getline(bug.file_path, bug.from_line)
     if line_content == '' and not os.path.isfile(bug.file_path):
         LOG.debug('%s does not exists!' % bug.file_path)
@@ -27,7 +29,7 @@ def gen_bug_hash(bug):
     file_name = os.path.basename(bug.file_path)
     l = [file_name, bug.checker_name, bug.msg, line_content,
          str(bug.from_col), str(bug.until_col)]
-    for p in bug.paths():
+    for p in bug.diag_sections():
         l.append(str(p.start_pos.col))
         l.append(str(p.end_pos.col))
     string_to_hash = '|||'.join(l)

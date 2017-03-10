@@ -13,6 +13,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 from libcodechecker import client
 from libcodechecker.logger import LoggerFactory
@@ -98,14 +99,23 @@ def run_check(args, actions, context):
     # Create one skip list handler shared between the analysis manager workers.
     skip_handler = _get_skip_handler(args)
 
+    issue_tags = {"suppress": "issue",
+                  "high" : "issue",
+                  "medium" : "issue",
+                  "low" : "issue",
+                  "style" : "issue"} 
+
     with client.get_connection() as connection:
         context.run_id = connection.add_checker_run(' '.join(sys.argv),
                                                     args.name,
                                                     context.version,
-                                                    args.force)
+                                                    str(datetime.now()))
+        for tag_name, tag_type in issue_tags.iteritems():
+            connection.store_tag(tag_name, tag_type)
 
         # Clean previous suppress information.
-        client.clean_suppress(connection, context.run_id)
+        # FIXME when should we clean suppress data?
+        #client.clean_suppress(connection, report_id)
 
         if os.path.exists(suppress_file):
             client.send_suppress(context.run_id, connection, suppress_file)
@@ -134,7 +144,7 @@ def run_check(args, actions, context):
     end_time = time.time()
 
     with client.get_connection() as connection:
-        connection.finish_checker_run(context.run_id)
+        connection.finish_checker_run(context.run_id, str(datetime.now()))
 
     LOG.info("Analysis length: " + str(end_time - start_time) + " sec.")
 

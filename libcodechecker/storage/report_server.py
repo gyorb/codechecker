@@ -9,6 +9,7 @@ from __future__ import unicode_literals
 
 import datetime
 import errno
+import hashlib
 import ntpath
 import os
 import socket
@@ -27,8 +28,9 @@ from DBThriftAPI.ttypes import *
 from libcodechecker import database_handler
 from libcodechecker import decorators
 from libcodechecker.logger import LoggerFactory
-from libcodechecker.orm_model import *
 from libcodechecker.profiler import timeit
+
+from libcodechecker.orm_model import *
 
 LOG = LoggerFactory.get_new_logger('CC SERVER')
 
@@ -46,538 +48,435 @@ class CheckerReportHandler(object):
     information to the database.
     """
 
-    def __sequence_deleter(self, table, first_id):
-        """Delete points of sequence in a general way."""
-        next_id = first_id
-        while next_id:
-            item = self.session.query(table).get(next_id)
-            if item:
-                next_id = item.next
-                self.session.delete(item)
-            else:
-                break
+    @decorators.catch_sqlalchemy
+    @timeit
+    def store_report_comment(self, report_id, comment, comment_by='CodeChecker'):
 
-    def __del_source_file_for_report(self, run_id, report_id, report_file_id):
-        """
-        Delete the stored file if there are no report references to it
-        in the database.
-        """
-        report_reference_to_file = self.session.query(Report) \
-            .filter(
-            and_(Report.run_id == run_id,
-                 Report.file_id == report_file_id,
-                 Report.id != report_id))
-        rep_ref_count = report_reference_to_file.count()
-        if rep_ref_count == 0:
-            LOG.debug("No other references to the source file \n id: " +
-                      str(report_file_id) + " can be deleted.")
-            # There are no other references to the file, it can be deleted.
-            self.session.query(File).filter(File.id == report_file_id) \
-                .delete()
-        return rep_ref_count
-
-    def __del_buildaction_results(self, build_action_id, run_id):
-        """
-        Delete the build action and related analysis results from the database.
-
-        Report entry will be deleted by ReportsToBuildActions cascade delete.
-        """
-        LOG.debug("Cleaning old buildactions")
-
-        try:
-            rep_to_ba = self.session.query(ReportsToBuildActions) \
-                .filter(ReportsToBuildActions.build_action_id ==
-                        build_action_id)
-
-            reports_to_delete = [r.report_id for r in rep_to_ba]
-
-            LOG.debug("Trying to delete reports belonging to the buildaction:")
-            LOG.debug(reports_to_delete)
-
-            for report_id in reports_to_delete:
-                # Check if there is another reference to this report from
-                # other buildactions.
-                other_reference = self.session.query(ReportsToBuildActions) \
-                    .filter(
-                    and_(ReportsToBuildActions.report_id == report_id,
-                         ReportsToBuildActions.build_action_id !=
-                         build_action_id))
-
-                LOG.debug("Checking report id:" + str(report_id))
-
-                LOG.debug("Report id " + str(report_id) +
-                          " reference count: " +
-                          str(other_reference.count()))
-
-                if other_reference.count() == 0:
-                    # There is no other reference, data related to the report
-                    # can be deleted.
-                    report = self.session.query(Report).get(report_id)
-
-                    LOG.debug("Removing bug path events.")
-                    self.__sequence_deleter(BugPathEvent,
-                                            report.start_bugevent)
-                    LOG.debug("Removing bug report points.")
-                    self.__sequence_deleter(BugReportPoint,
-                                            report.start_bugpoint)
-
-                    if self.__del_source_file_for_report(run_id, report.id,
-                                                         report.file_id):
-                        LOG.debug("Stored source file needs to be kept, "
-                                  "there is reference to it from another "
-                                  "report.")
-                        # Report needs to be deleted if there is no reference
-                        # the file cascade delete will remove it else manual
-                        # cleanup is needed.
-                        self.session.delete(report)
-
-            self.session.query(BuildAction).filter(
-                BuildAction.id == build_action_id) \
-                .delete()
-
-            self.session.query(ReportsToBuildActions).\
-                filter(ReportsToBuildActions.build_action_id ==
-                       build_action_id).\
-                delete()
-        except Exception as ex:
-            raise shared.ttypes.RequestFailed(
-                shared.ttypes.ErrorCode.GENERAL,
-                str(ex))
+        report_comment = ReportComment(report_id, comment, comment_by)
+        self.session.add(report_comment)
+        self.session.commit()
+    
 
     @decorators.catch_sqlalchemy
     @timeit
-    def addCheckerRun(self, command, name, version, force):
+    def addCheckerRun(self, command, name, version, start_date):
         """
         Store checker run related data to the database.
         By default updates the results if name already exists.
         Using the force flag removes existing analysis results for a run.
         """
-        run = self.session.query(Run).filter(Run.name == name).first()
-        if run and force:
-            # Clean already collected results.
-            if not run.can_delete:
-                # Deletion is already in progress.
-                msg = "Can't delete " + str(run.id)
-                LOG.debug(msg)
-                raise shared.ttypes.RequestFailed(
-                    shared.ttypes.ErrorCode.DATABASE,
-                    msg)
 
-            LOG.info('Removing previous analysis results ...')
-            self.session.delete(run)
+        run = self.session.query(Run).filter(Run.name == name).one_or_none()
+        if run:
+            # FIXME there is already a run delete and create a new run
+            # remove reports which belong only to this run
+
+            run.start(start_date)
+            run.set_version(version)
+
+            run_meta = self.session.query(RunMeta).get(run_id)
+            run_meta.set_run_cmd(command)
+
+            self.session.add(run)
+            self.session.add(run_meta)
             self.session.commit()
 
-            checker_run = Run(name, version, command)
-            self.session.add(checker_run)
-            self.session.commit()
-            return checker_run.id
-
-        elif run:
-            # There is already a run, update the results.
-            run.date = datetime.now()
-            # Increment update counter and the command.
-            run.inc_count += 1
-            run.command = command
-            self.session.commit()
-            return run.id
+            return run.run_id
         else:
             # There is no run create new.
-            checker_run = Run(name, version, command)
-            self.session.add(checker_run)
+            run = Run(name)
+            run.set_version(version)
+            run.start(start_date)
+            self.session.add(run)
             self.session.commit()
-            return checker_run.id
+
+            run_id = run.run_id
+
+            # initialize meta information for the run
+            run_meta = RunMeta(run_id)
+            run_meta.set_run_cmd(command)
+            self.session.add(run_meta)
+            self.session.commit()
+
+            return run_id
 
     @decorators.catch_sqlalchemy
     @timeit
-    def finishCheckerRun(self, run_id):
+    def finishCheckerRun(self, run_id, finish_date):
         """
         """
+        LOG.debug('Finishing run: '+ str(run_id))
         run = self.session.query(Run).get(run_id)
+
+        LOG.debug(run.run_id)
+        LOG.debug(run.start_date)
+        LOG.debug(run.end_date)
         if not run:
             return False
 
-        run.mark_finished()
+        run.finish(finish_date)
         self.session.commit()
         return True
 
     @decorators.catch_sqlalchemy
     @timeit
     def replaceConfigInfo(self, run_id, config_values):
-        """
-        Removes all the previously stored config information and stores the
-        new values.
-        """
-        count = self.session.query(Config) \
-            .filter(Config.run_id == run_id) \
-            .delete()
-        LOG.debug('Config: ' + str(count) + ' removed item.')
+        # FIXME store configuration
+        #"""
+        #Removes all the previously stored config information and stores the
+        #new values.
+        #"""
+        #count = self.session.query(Config) \
+        #    .filter(Config.run_id == run_id) \
+        #    .delete()
+        #LOG.debug('Config: ' + str(count) + ' removed item.')
 
-        configs = [Config(
-            run_id, info.checker_name, info.attribute, info.value) for
-            info in config_values]
-        self.session.bulk_save_objects(configs)
-        self.session.commit()
+        #configs = [Config(
+        #    run_id, info.checker_name, info.attribute, info.value) for
+        #    info in config_values]
+        #self.session.bulk_save_objects(configs)
+        #self.session.commit()
         return True
 
     @decorators.catch_sqlalchemy
     @timeit
-    def addBuildAction(self,
-                       run_id,
-                       build_cmd_hash,
-                       check_cmd,
-                       analyzer_type,
-                       analyzed_source_file):
+    def storeCompilationAction(self,
+                               run_id,
+                               compilation_cmd_id,
+                               compilation_cmd):
         """
+        Store the compilation action to a run.
         """
         try:
+            cmp_action = self.session.query(CompilationAction).get(compilation_cmd_id)
+            if not cmp_action:
 
-            build_actions = \
-                self.session.query(BuildAction) \
-                    .filter(
-                    and_(BuildAction.run_id == run_id,
-                         BuildAction.build_cmd_hash == build_cmd_hash,
-                         or_(
-                             and_(
-                                 BuildAction.analyzer_type == analyzer_type,
-                                 BuildAction.analyzed_source_file ==
-                                 analyzed_source_file),
-                             and_(BuildAction.analyzer_type == "",
-                                  BuildAction.analyzed_source_file == "")
-                         ))) \
-                    .all()
+                LOG.debug("Storing compilation commmand.")
 
-            if build_actions:
-                # Delete the already stored buildaction and analysis results.
-                for build_action in build_actions:
-                    self.__del_buildaction_results(build_action.id, run_id)
-
+                comp_action = CompilationAction(compilation_cmd_id,
+                                                run_id,
+                                                compilation_cmd)
+                self.session.add(comp_action)
                 self.session.commit()
+                return True
 
-            action = BuildAction(run_id,
-                                 build_cmd_hash,
-                                 check_cmd,
-                                 analyzer_type,
-                                 analyzed_source_file)
-            self.session.add(action)
-            self.session.commit()
+            return False
 
         except Exception as ex:
             LOG.error(ex)
             raise
 
-        return action.id
 
     @decorators.catch_sqlalchemy
     @timeit
-    def finishBuildAction(self, action_id, failure):
+    def storeAnalysisAction(self,
+                            run_id,
+                            analysis_cmd,
+                            analyzer_type,
+                            analyzed_source_file,
+                            msg):
         """
+        Store the analysis actions with some meta information.
         """
-        action = self.session.query(BuildAction).get(action_id)
-        if action is None:
-            # TODO: if file is not needed update reportsToBuildActions.
+        try:
+
+            aaction_hash = hashlib.sha1(analysis_cmd).hexdigest()
+
+            LOG.debug("checking analysis action")
+            analysis_action = self.session.query(AnalysisAction).get(aaction_hash)
+            LOG.debug("checking analysis action done")
+            LOG.debug(analysis_action)
+            if not analysis_action:
+                LOG.debug("storing analysis action")
+                analysis_action = AnalysisAction(aaction_hash,
+                                                 analyzer_type,
+                                                 run_id)
+                self.session.add(analysis_action)
+
+                aaction_meta = AnalysisActionMeta(aaction_hash,
+                                                  analysis_cmd)
+                aaction_meta.set_msg(msg)
+                self.session.add(aaction_meta)
+
+            return aaction_hash
+
+        except Exception as ex:
+            LOG.error(ex)
+            raise
+
+        finally:
+            self.session.commit()
+
+
+    @decorators.catch_sqlalchemy
+    @timeit
+    def needFileContent(self, source_content_hash):
+        """
+        Check if file content is needed based on the content hash.
+        """
+        try:
+            f = self.session.query(File).get(source_content_hash)
+            if f:
+                return False
+            return True
+        except Exception as ex:
+            raise shared.ttypes.RequestFailed(
+                shared.ttypes.ErrorCode.GENERAL,
+                str(ex))
+
+
+    @decorators.catch_sqlalchemy
+    @timeit
+    def addTagToIssue(self, tag_name, report_id):
+        # TODO move out to shared module
+
+        tag = self.session.query(Tag) \
+                .filter(Tag.name == tag_name).one_or_none()
+
+        if not tag or tag.kind != 'issue':
+            # tag not found or tries to apply the wrong kind of tag
+            LOG.debug('Failed to apply tag: ' +
+                      tag.name + " to issue: " + report_id)
             return False
 
-        action.mark_finished(failure)
+        r2tag = ReportToTag(report_id, tag.id)
+        self.session.add(r2tag)
+        self.session.commit()
+
+        comment = "Applying tag: "+str(tag.name)
+        self.store_report_comment(report_id, comment)
+
+        return True
+
+
+    @decorators.catch_sqlalchemy
+    @timeit
+    def addFileContent(self, file_content_hash, filepath, content):
+        """
+        Store file and file meta information
+        """
+        new_file = File(file_content_hash, filepath)
+        self.session.add(new_file)
+        file_meta = FileMeta(file_content_hash, content)
+        self.session.add(file_meta)
         self.session.commit()
         return True
 
-    @decorators.catch_sqlalchemy
-    @timeit
-    def needFileContent(self, run_id, filepath):
-        """
-        """
-        try:
-            f = self.session.query(File) \
-                .filter(and_(File.run_id == run_id,
-                             File.filepath == filepath)) \
-                .one_or_none()
-        except Exception as ex:
-            raise shared.ttypes.RequestFailed(
-                shared.ttypes.ErrorCode.GENERAL,
-                str(ex))
 
-        run_inc_count = self.session.query(Run).get(run_id).inc_count
-        needed = False
-        if not f:
-            needed = True
-            f = File(run_id, filepath)
-            self.session.add(f)
+    def storeDiagSections(self, report_id, diag_sections):
+
+        LOG.debug("Storing diagnostic data")
+        try:
+            for ds in diag_sections:
+                dsc = DiagSection(ds.file_id,
+                                  report_id,
+                                  ds.startLine,
+                                  ds.endLine,
+                                  ds.startCol,
+                                  ds.endCol,
+                                  ds.msg,
+                                  ds.kind,
+                                  ds.path_position)
+                self.session.add(dsc)
+
             self.session.commit()
-        elif f.inc_count < run_inc_count:
-            needed = True
-            f.inc_count = run_inc_count
-        return NeedFileResult(needed, f.id)
+            LOG.debug("Storing diagnostic sections done")
+
+
+        except Exception as ex:
+            LOG.debug(ex)
+
 
     @decorators.catch_sqlalchemy
     @timeit
-    def addFileContent(self, id, content):
-        """
-        """
-        f = self.session.query(File).get(id)
-        assert f is not None
-        f.addContent(content)
-        return True
-
-    def __is_same_event_path(self, start_bugevent_id, events):
-        """
-        Checks if the given event path is the same as the one in the
-        events argument.
-        """
-        try:
-            # There should be at least one bug event.
-            point2 = self.session.query(BugPathEvent).get(start_bugevent_id)
-
-            for point1 in events:
-                if point1.startLine != point2.line_begin or \
-                        point1.startCol != point2.col_begin or \
-                        point1.endLine != point2.line_end or \
-                        point1.endCol != point2.col_end or \
-                        point1.msg != point2.msg or \
-                        point1.fileId != point2.file_id:
-                    return False
-
-                if point2.next is None:
-                    return point1 == events[-1]
-
-                point2 = self.session.query(BugPathEvent).get(point2.next)
-
-        except Exception as ex:
-            raise shared.ttypes.RequestFailed(
-                shared.ttypes.ErrorCode.GENERAL,
-                str(ex))
-
-    def storeReportInfo(self,
-                        action,
-                        file_id,
-                        bug_hash,
-                        msg,
-                        bugpath,
-                        events,
-                        checker_id,
-                        checker_cat,
-                        bug_type,
-                        severity,
-                        suppressed=False):
+    def addReport(self, report):
         """
         """
         try:
-            path_ids = self.storeBugPath(bugpath)
-            event_ids = self.storeBugEvents(events)
-            path_start = path_ids[0].id if len(path_ids) > 0 else None
 
-            source_file = self.session.query(File).get(file_id)
-            source_file_path, source_file_name = ntpath.split(
-                source_file.filepath)
+            rep = self.session.query(Report).get(report.report_id)
+            if rep:
+                LOG.debug("Report already found")
+                return rep.report_id
 
-            # Old suppress format did not contain file name.
-            suppressed = self.session.query(SuppressBug).filter(
-                and_(SuppressBug.run_id == action.run_id,
-                     SuppressBug.hash == bug_hash,
-                     or_(SuppressBug.file_name == source_file_name,
-                         SuppressBug.file_name == u''))).count() > 0
 
-            report = Report(action.run_id,
-                            bug_hash,
-                            file_id,
-                            msg,
-                            path_start,
-                            event_ids[0].id,
-                            event_ids[-1].id,
-                            checker_id,
-                            checker_cat,
-                            bug_type,
-                            severity,
-                            suppressed)
+            report_to_store = Report(report.report_id,
+                                     report.report_hash,
+                                     report.phash,
+                                     report.checker_name,
+                                     report.checker_cat,
+                                     report.report_type,
+                                     report.main_diag_section.msg)
 
-            self.session.add(report)
+            self.session.add(report_to_store)
             self.session.commit()
-            # Commit required to get the ID of the newly added report.
-            reportToActions = ReportsToBuildActions(report.id, action.id)
-            self.session.add(reportToActions)
-            # Avoid data loss for duplicate keys.
+
+
+            d_sections = report.diagnostic
+            d_sections.append(report.main_diag_section)
+
+            self.storeDiagSections(report.report_id, d_sections)
             self.session.commit()
-            return report.id
+
+            return report.report_id
+
+
         except Exception as ex:
             raise shared.ttypes.RequestFailed(
                 shared.ttypes.ErrorCode.GENERAL,
                 str(ex))
 
+
     @decorators.catch_sqlalchemy
     @timeit
-    def addReport(self,
-                  build_action_id,
-                  file_id,
-                  bug_hash,
-                  msg,
-                  bugpath,
-                  events,
-                  checker_id,
-                  checker_cat,
-                  bug_type,
-                  severity,
-                  suppress):
+    def storeReportComment(self, report_id, comment, comment_by):
         """
         """
         try:
-            action = self.session.query(BuildAction).get(build_action_id)
-            assert action is not None
 
-            checker_id = checker_id or 'NOT FOUND'
+            LOG.debug("Adding report comment entry.")
+            self.store_report_comment(report_id, comment, comment_by)
+            return True
 
-            # TODO: performance issues when executing the following query on
-            # large databases?
-            reports = self.session.query(self.report_ident) \
-                .filter(and_(self.report_ident.c.bug_id == bug_hash,
-                             self.report_ident.c.run_id == action.run_id))
-            try:
-                # Check for duplicates by bug hash.
-                if reports.count() != 0:
-                    for possib_dup in reports:
-                        # It's a duplicate or a hash clash. Check checker name,
-                        # file id, and position.
-                        dup_report_obj = self.session.query(Report).get(
-                            possib_dup.report_ident.id)
-                        if dup_report_obj and \
-                                dup_report_obj.checker_id == checker_id and \
-                                dup_report_obj.file_id == file_id and \
-                                self.__is_same_event_path(
-                                    dup_report_obj.start_bugevent, events):
-                            # It's a duplicate.
-                            rtp = self.session.query(ReportsToBuildActions) \
-                                .get((dup_report_obj.id,
-                                      action.id))
-                            if not rtp:
-                                reportToActions = ReportsToBuildActions(
-                                    dup_report_obj.id, action.id)
-                                self.session.add(reportToActions)
-                                self.session.commit()
-                            return dup_report_obj.id
-
-                return self.storeReportInfo(action,
-                                            file_id,
-                                            bug_hash,
-                                            msg,
-                                            bugpath,
-                                            events,
-                                            checker_id,
-                                            checker_cat,
-                                            bug_type,
-                                            severity,
-                                            suppress)
-
-            except sqlalchemy.exc.IntegrityError as ex:
-                self.session.rollback()
-
-                reports = self.session.query(self.report_ident) \
-                    .filter(and_(self.report_ident.c.bug_id == bug_hash,
-                                 self.report_ident.c.run_id == action.run_id))
-                if reports.count() != 0:
-                    return reports.first().report_ident.id
-                else:
-                    raise
         except Exception as ex:
             raise shared.ttypes.RequestFailed(
                 shared.ttypes.ErrorCode.GENERAL,
                 str(ex))
 
-    def storeBugEvents(self, bugevents):
-        """
-        """
-        events = []
-        for event in bugevents:
-            bpe = BugPathEvent(event.startLine,
-                               event.startCol,
-                               event.endLine,
-                               event.endCol,
-                               event.msg,
-                               event.fileId)
-            self.session.add(bpe)
-            events.append(bpe)
-
-        self.session.flush()
-
-        if len(events) > 1:
-            for i in range(len(events) - 1):
-                events[i].addNext(events[i + 1].id)
-                events[i + 1].addPrev(events[i].id)
-            events[-1].addPrev(events[-2].id)
-        return events
-
-    def storeBugPath(self, bugpath):
-        paths = []
-        for i in range(len(bugpath)):
-            brp = BugReportPoint(bugpath[i].startLine,
-                                 bugpath[i].startCol,
-                                 bugpath[i].endLine,
-                                 bugpath[i].endCol,
-                                 bugpath[i].fileId)
-            self.session.add(brp)
-            paths.append(brp)
-
-        self.session.flush()
-
-        for i in range(len(paths) - 1):
-            paths[i].addNext(paths[i + 1].id)
-
-        return paths
 
     @decorators.catch_sqlalchemy
     @timeit
-    def addSuppressBug(self, run_id, bugs_to_suppress):
+    def addToRun(self, run_id, report_id):
+        try:
+            added_to_run = self.session.query(RunToReport) \
+                    .filter(RunToReport.run_id == run_id,
+                            RunToReport.report_id == report_id).one_or_none()
+
+            if not added_to_run:
+                LOG.debug("adding new issue to the run")
+                LOG.debug(run_id)
+
+                add_to_run = RunToReport(run_id, report_id)
+                self.session.add(add_to_run)
+                self.session.commit()
+            return True
+
+        except Exception as ex:
+            raise shared.ttypes.RequestFailed(
+                shared.ttypes.ErrorCode.GENERAL,
+                str(ex))
+
+
+    @decorators.catch_sqlalchemy
+    @timeit
+    def storeTag(self, tag_name, kind):
+
+        try:
+            tag = self.session.query(Tag) \
+                    .filter(Tag.name == tag_name).one_or_none()
+            if not tag:
+                LOG.debug("Adding new tag " + tag_name + " " + kind)
+                new_tag = Tag(tag_name, kind)
+                self.session.add(new_tag)
+                self.session.commit()
+            else:
+                LOG.debug("Tag: "+ tag_name + " already stored.")
+
+            return True
+
+        except Exception as ex:
+            raise shared.ttypes.RequestFailed(
+                shared.ttypes.ErrorCode.GENERAL,
+                str(ex))
+
+
+    @decorators.catch_sqlalchemy
+    @timeit
+    def deleteTag(self, tag_name):
+
+        try:
+            tag = self.session.query(Tag) \
+                    .filter(Tag.name == tag_name).one_or_none()
+            if tag:
+                self.session.delete(tag)
+                self.session.commit()
+
+            return True
+
+        except Exception as ex:
+            raise shared.ttypes.RequestFailed(
+                shared.ttypes.ErrorCode.GENERAL,
+                str(ex))
+
+    @decorators.catch_sqlalchemy
+    @timeit
+    def suppressReport(self, suppress_report_data):
         """
         Supppress multiple bugs for a run. This can be used before storing
         the suppress file content.
+
         """
 
         try:
-            suppressList = []
-            for bug_to_suppress in bugs_to_suppress:
-                res = self.session.query(SuppressBug) \
-                    .filter(SuppressBug.hash == bug_to_suppress.bug_hash,
-                            SuppressBug.run_id == run_id,
-                            SuppressBug.file_name == bug_to_suppress.file_name)
+            # FIXME common method to get suppress tag id
+            suppress_tag = self.session.query(Tag) \
+                    .filter(Tag.name == "suppress").one_or_none()
 
-                if res.one_or_none():
-                    res.update({'comment': bug_to_suppress.comment})
+            for srd in suppress_report_data:
+                report_id = srd.report_id
+                sup_report = self.session.query(Suppress).get(srd.report_id)
+                LOG.debug(sup_report)
+
+                if sup_report and srd.force_update:
+                    LOG.debug('Suppressed report found updating')
+                    sup_report.set_comment(srd.comment)
+                    self.session.add(sup_report)
+                    self.session.commit()
+                    self.store_report_comment(srd.report_id, 'Suppress updated')
                 else:
-                    self.session.add(SuppressBug(run_id,
-                                                 bug_to_suppress.bug_hash,
-                                                 bug_to_suppress.file_name,
-                                                 bug_to_suppress.comment))
+                    LOG.debug('Suppressed report not found')
+                    srp = Suppress(srd.report_id, srd.file_name, srd.comment)
+                    self.session.add(srp)
+                    self.session.commit()
 
-            self.session.commit()
+                    srp_tag = self.session.query(ReportToTag) \
+                            .filter(ReportToTag.report_id == srd.report_id,
+                                    ReportToTag.tagid == suppress_tag.id) \
+                                    .one_or_none()
+                    if not srp_tag:
+                        LOG.debug('adding suppress tag')
+                        new_tag = ReportToTag(srd.report_id,
+                                                   suppress_tag.id)
+                        self.session.add(new_tag)
+                        self.session.commit()
+
+                    LOG.debug('adding comment')
+                    self.store_report_comment(srd.report_id, 'Report suppressed')
+
+            return True
 
         except Exception as ex:
             LOG.error(str(ex))
             return False
 
-        return True
 
     @decorators.catch_sqlalchemy
     @timeit
-    def cleanSuppressData(self, run_id):
+    def unsuppressReport(self, report_id):
         """
-        Clean the suppress bug entries for a run
-        and remove suppressed flags for the suppressed reports.
         Only the database is modified.
         """
-
         try:
-            count = self.session.query(SuppressBug) \
-                .filter(SuppressBug.run_id == run_id) \
-                .delete()
-            LOG.debug('Cleaning previous suppress entries from the database.'
-                      '{0} removed items.'.format(str(count)))
 
-            reports = self.session.query(Report) \
-                .filter(and_(Report.run_id == run_id,
-                             Report.suppressed)) \
-                .all()
+            suppress_tag = self.session.query(Tag) \
+                    .filter(Tag.name == "suppress").one_or_none()
 
-            for report in reports:
-                report.suppressed = False
+            suppressed = self.session.query(Suppress) \
+                    .filter(Suppress.report_id == report_id).delete()
 
             self.session.commit()
+
+            self.store_report_comment(srd.report_id, 'Report unsuppressed.')
 
         except Exception as ex:
             LOG.error(str(ex))
@@ -588,19 +487,20 @@ class CheckerReportHandler(object):
     @decorators.catch_sqlalchemy
     @timeit
     def addSkipPath(self, run_id, paths):
+        # FIXME store skip information
         """
         """
-        count = self.session.query(SkipPath) \
-            .filter(SkipPath.run_id == run_id) \
-            .delete()
-        LOG.debug('SkipPath: ' + str(count) + ' removed item.')
+        #count = self.session.query(SkipPath) \
+        #    .filter(SkipPath.run_id == run_id) \
+        #    .delete()
+        #LOG.debug('SkipPath: ' + str(count) + ' removed item.')
 
-        skipPathList = []
-        for path, comment in paths.items():
-            skipPath = SkipPath(run_id, path, comment)
-            skipPathList.append(skipPath)
-        self.session.bulk_save_objects(skipPathList)
-        self.session.commit()
+        #skipPathList = []
+        #for path, comment in paths.items():
+        #    skipPath = SkipPath(run_id, path, comment)
+        #    skipPathList.append(skipPath)
+        #self.session.bulk_save_objects(skipPathList)
+        #self.session.commit()
         return True
 
     @decorators.catch_sqlalchemy
@@ -613,12 +513,6 @@ class CheckerReportHandler(object):
 
     def __init__(self, session):
         self.session = session
-        self.report_ident = sqlalchemy.orm.query.Bundle('report_ident',
-                                                        Report.id,
-                                                        Report.bug_id,
-                                                        Report.run_id,
-                                                        Report.start_bugevent,
-                                                        Report.start_bugpoint)
 
 
 def run_server(port, db_uri, callback_event=None):

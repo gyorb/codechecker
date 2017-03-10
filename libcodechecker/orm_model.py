@@ -6,11 +6,9 @@
 """
 ORM model.
 """
-from __future__ import print_function
 from __future__ import unicode_literals
 
 from datetime import datetime
-from math import ceil
 
 from sqlalchemy import *
 from sqlalchemy.ext.declarative import declarative_base
@@ -32,7 +30,13 @@ Base = declarative_base(metadata=CC_META)
 # Start of ORM classes.
 
 class DBVersion(Base):
-    __tablename__ = 'db_version'
+    """
+    Store schema version information used to check compatibility.
+    With alembic automatic schema migration done but that is not
+    available for SQLite now.
+    """
+
+    __tablename__ = 'db_versions'
     # TODO: constraint, only one line in this table
     major = Column(Integer, primary_key=True)
     minor = Column(Integer, primary_key=True)
@@ -42,296 +46,417 @@ class DBVersion(Base):
         self.minor = minor
 
 
-class Run(Base):
-    __tablename__ = 'runs'
-
-    __table_args__ = (
-        UniqueConstraint('name'),
-    )
-
-    id = Column(Integer, autoincrement=True, primary_key=True)
-    date = Column(DateTime)
-    duration = Column(Integer)  # Seconds, -1 if unfinished.
-    name = Column(String)
-    version = Column(String)
-    command = Column(String)
-    inc_count = Column(Integer)
-    can_delete = Column(Boolean, nullable=False, server_default=true(),
-                        default=True)
-
-    # Relationships (One to Many).
-    configlist = relationship('Config', cascade="all, delete-orphan",
-                              passive_deletes=True)
-    buildactionlist = relationship('BuildAction', cascade="all, delete-orphan",
-                                   passive_deletes=True)
-
-    def __init__(self, name, version, command):
-        self.date, self.name, self.version, self.command = \
-            datetime.now(), name, version, command
-        self.duration = -1
-        self.inc_count = 0
-
-    def mark_finished(self):
-        self.duration = ceil((datetime.now() - self.date).total_seconds())
-
-
-class Config(Base):
-    __tablename__ = 'configs'
-
-    run_id = Column(Integer,
-                    ForeignKey('runs.id', deferrable=True,
-                               initially="DEFERRED", ondelete='CASCADE'),
-                    primary_key=True)
-    checker_name = Column(String, primary_key=True)
-    attribute = Column(String, primary_key=True)
-    value = Column(String, primary_key=True)
-
-    def __init__(self, run_id, checker_name, attribute, value):
-        self.attribute, self.value = attribute, value
-        self.checker_name, self.run_id = checker_name, run_id
-
-
 class File(Base):
+    """
+    Main identification of a file is based on the content hash.
+    """
+
     __tablename__ = 'files'
 
-    id = Column(Integer, autoincrement=True, primary_key=True)
-    run_id = Column(Integer,
-                    ForeignKey('runs.id', deferrable=True,
-                               initially="DEFERRED",
-                               ondelete='CASCADE')
-                    )
+    fhash = Column(String, primary_key=True)
     filepath = Column(String)
+
+    def __init__(self, fhash, filepath):
+        self.fhash = fhash
+        self.filepath = filepath
+
+
+class FileMeta(Base):
+    """
+    Store additional information for the source files.
+
+    Entry should be deleted if file is deleted.
+    """
+
+    __tablename__ = 'file_metas'
+
+    fhash = Column(String, ForeignKey('files.fhash',
+                                      deferrable=True,
+                                      initially="DEFERRED",
+                                      ondelete='CASCADE'),
+                                      primary_key=True)
+    # bzipped file content
     content = Column(Binary)
-    inc_count = Column(Integer)
 
-    def __init__(self, run_id, filepath):
-        self.run_id, self.filepath = run_id, filepath
-        self.inc_count = 0
-
-    def addContent(self, content):
+    def __init__(self, fhash, content):
+        self.fhash = fhash
         self.content = content
 
 
-class BuildAction(Base):
-    __tablename__ = 'build_actions'
+class Run(Base):
+    """
+    One analysis run related data.
+    """
 
-    id = Column(Integer, autoincrement=True, primary_key=True)
+    __tablename__ = 'runs'
+
+    run_id = Column(Integer, autoincrement=True, primary_key=True)
+    name = Column(String)
+    version = Column(String) # CodeChecker version used for this run.
+    start_date = Column(String) # FIXME convert to DateTime thrift api string to datetime conversion needed
+    end_date = Column(String) # FIXME convert to DateTime thrift api string to datetime conversion needed
+
+    def __init__(self, run_name):
+        self.name = run_name
+
+    def start(self, date):
+        self.start_date = date
+
+    def finish(self, date):
+        self.end_date = date
+
+    def set_version(self, version):
+        self.version = version
+
+
+class RunMeta(Base):
+    """
+    Additional informations for each run which might be interesting.
+
+    Entry should be deleted if run is deleted.
+    """
+
+    __tablename__ = 'run_metas'
+
     run_id = Column(Integer,
-                    ForeignKey('runs.id', deferrable=True,
-                               initially="DEFERRED", ondelete='CASCADE')
-                    )
-    build_cmd_hash = Column('build_cmd', String)
-    analyzer_type = Column(String, nullable=False)
-    analyzed_source_file = Column(String, nullable=False)
-    check_cmd = Column(String)
-    # No failure if the text is empty.
-    failure_txt = Column(String)
-    date = Column(DateTime)
+                    ForeignKey('runs.run_id',
+                               deferrable=True,
+                               initially="DEFERRED",
+                               ondelete='CASCADE'),
+                               primary_key=True)
+    # Bzip compressed run command.
+    run_cmd = Column(Binary)
 
-    # Seconds, -1 if unfinished.
-    duration = Column(Integer)
+    def __init__(self, run_id):
+        self.run_id = run_id
 
-    def __init__(self, run_id, build_cmd_hash, check_cmd, analyzer_type,
-                 analyzed_source_file):
-        self.run_id, self.build_cmd_hash, self.check_cmd, self.failure_txt = \
-            run_id, build_cmd_hash, check_cmd, ''
-        self.date = datetime.now()
+    def set_run_cmd(self, run_cmd):
+        self.run_cmd = run_cmd
+
+
+class RunToTag(Base):
+    """
+    Assign tags to runs.
+
+    Entry should be deleted if run is deleted.
+    """
+
+    __tablename__ = 'run_to_tags'
+
+    id = Column(Integer, autoincrement=True, primary_key=True)
+    run_id = Column(String,
+                    ForeignKey('runs.run_id',
+                               deferrable=True,
+                               initially="DEFERRED",
+                               ondelete='CASCADE'))
+    tagid = Column(Integer,
+                   ForeignKey('tags.id',),
+                   nullable=False)
+
+    def __init__(self, run_name, tagid):
+        self.run_name = run_name
+        self.tagid = tagid
+
+
+class RunToReport(Base):
+    """
+    Assign reports to runs.
+
+    Entry should be deleted if run is deleted.
+    """
+
+    __tablename__ = 'run_to_reports'
+
+    id = Column(Integer, autoincrement=True, primary_key=True)
+    run_id = Column(Integer, ForeignKey('runs.run_id',
+                                        deferrable=True,
+                                        initially="DEFERRED",
+                                        ondelete='CASCADE'))
+
+    report_id = Column(String, ForeignKey('reports.report_id'))
+
+    def __init__(self, run_id, report_id):
+        self.run_id = run_id
+        self.report_id = report_id
+
+
+class CompilationAction(Base):
+    """
+    Compilation actions.
+
+    Entry should be deleted if run is deleted.
+    """
+
+    __tablename__ = 'compilation_actions'
+
+    # Hash of the compilation action.
+    chash = Column(String, primary_key=True)
+
+    run_id = Column(Integer, ForeignKey('runs.run_id',
+                                        deferrable=True,
+                                        initially="DEFERRED",
+                                        ondelete='CASCADE'))
+
+    compilation_cmd = Column(Binary) # Bzipped compilation commmand.
+
+    def __init__(self, chash, run_id, compilation_cmd):
+        self.chash = chash
+        self.run_id = run_id
+        self.compilation_cmd = compilation_cmd
+
+
+class AnalysisAction(Base):
+    """
+    Store the constructed analysis action and the
+    analyzer related data (type) if available.
+    """
+
+    __tablename__ = 'analysis_actions'
+
+    # Hash of the analysis action.
+    ahash = Column(String, primary_key=True)
+
+    run_id = Column(Integer, ForeignKey('runs.run_id',
+                                        deferrable=True,
+                                        initially="DEFERRED",
+                                        ondelete='CASCADE'))
+    analyzer_type = Column(String)
+
+    def __init__(self, ahash, analyzer_type, run_id):
+        self.ahash = ahash
+        self.run_id = run_id
         self.analyzer_type = analyzer_type
-        self.analyzed_source_file = analyzed_source_file
-        self.duration = -1
-
-    def mark_finished(self, failure_txt):
-        self.failure_txt = failure_txt
-        self.duration = (datetime.now() - self.date).total_seconds()
 
 
-class BugPathEvent(Base):
-    __tablename__ = 'bug_path_events'
+class AnalysisActionMeta(Base):
+    """
+    Additional analysis action related informations
+    which might be interesting or can help debugging.
 
-    id = Column(Integer, autoincrement=True, primary_key=True)
-    line_begin = Column(Integer)
-    col_begin = Column(Integer)
-    line_end = Column(Integer)
-    col_end = Column(Integer)
-    msg = Column(String)
-    file_id = Column(Integer, ForeignKey('files.id', deferrable=True,
-                                         initially="DEFERRED",
-                                         ondelete='CASCADE'), index=True)
+    Should be deleted if AnalysisAction is deleted.
+    """
 
-    next = Column(Integer)
-    prev = Column(Integer)
+    __tablename__ = 'analysis_action_metas'
 
-    def __init__(self, line_begin, col_begin, line_end, col_end, msg, file_id):
-        self.line_begin, self.col_begin, self.line_end, self.col_end = \
-            line_begin, col_begin, line_end, col_end
-        self.file_id, self.msg = file_id, msg
+    ahash = Column(String, ForeignKey('analysis_actions.ahash',
+                                      deferrable=True,
+                                      initially="DEFERRED",
+                                      ondelete='CASCADE'),
+                                      primary_key=True)
 
-    def addPrev(self, prev):
-        self.prev = prev
+    analysis_cmd = Column(Binary) # bzipped analysis cmd
+    msg = Column(Binary) # failure or other msg, bziped
 
-    def addNext(self, next):
-        self.next = next
+    def __init__(self, ahash, analysis_cmd):
+        self.ahash = ahash
+        self.analysis_cmd = analysis_cmd
 
-    def isLast(self):
-        return self.next is None
-
-    def isFirst(self):
-        return self.prev is None
+    def set_msg(self, msg):
+        self.msg = msg
 
 
-class BugReportPoint(Base):
-    __tablename__ = 'bug_report_points'
+class DiagSection(Base):
+    """
+    Diagnostic sections store report related informations.
+    One report contains multiple diagnoscic sections which
+    can build a path or just various events/messages/notes ...
+
+    Line and column positions highly depend on the source content!
+    """
+
+    __tablename__ = 'diag_sections'
 
     id = Column(Integer, autoincrement=True, primary_key=True)
+
+    # to which file it belongs to
+    fhash = Column(String, ForeignKey('files.fhash',
+                                      deferrable=True,
+                                      initially="DEFERRED",
+                                      ondelete='CASCADE'))
+
+    report_id = Column(String, ForeignKey('reports.report_id'))
+
     line_begin = Column(Integer)
-    col_begin = Column(Integer)
     line_end = Column(Integer)
+    col_begin = Column(Integer)
     col_end = Column(Integer)
-    file_id = Column(Integer, ForeignKey('files.id', deferrable=True,
-                                         initially="DEFERRED",
-                                         ondelete='CASCADE'), index=True)
+    msg = Column(Binary)
+    kind = Column(Integer)
+    position = Column(Integer) # set only if part of diagnostic path
 
-    # TODO: Add check, the value must be an existing id or null.
-    # Be careful when inserting.
-    next = Column(Integer)
+    def __init__(self, file_hash, report_id,
+                 line_begin, line_end,
+                 col_begin, col_end,
+                 msg, kind, position):
 
-    def __init__(self, line_begin, col_begin, line_end, col_end, file_id):
-        self.line_begin, self.col_begin, self.line_end, self.col_end = \
-            line_begin, col_begin, line_end, col_end
-        self.file_id = file_id
-
-    def addNext(self, next):
-        self.next = next
-
-    def isLast(self):
-        return self.next is None
+        self.fhash = file_hash
+        self.report_id = report_id
+        self.line_begin = line_begin
+        self.line_end = line_end
+        self.col_begin = col_begin
+        self.col_end = col_end
+        self.msg = msg
+        self.kind = kind
+        self.position = position
 
 
 class Report(Base):
+    """
+    Report related information.
+    """
+
     __tablename__ = 'reports'
 
-    id = Column(Integer, autoincrement=True, primary_key=True)
-    file_id = Column(Integer, ForeignKey('files.id', deferrable=True,
-                                         initially="DEFERRED",
-                                         ondelete='CASCADE'))
-    run_id = Column(Integer,
-                    ForeignKey('runs.id', deferrable=True,
-                               initially="DEFERRED",
-                               ondelete='CASCADE'),
-                    index=True)
-    bug_id = Column(String, index=True)
-    checker_id = Column(String)
-    checker_cat = Column(String)
-    bug_type = Column(String)
-    severity = Column(Integer)
+    # Should be a unique id which identifies only one report!
+    report_id = Column(String, primary_key=True)
 
-    # TODO: multiple messages to multiple source locations?
-    checker_message = Column(String)
-    start_bugpoint = Column(Integer,
-                            ForeignKey('bug_report_points.id', deferrable=True,
-                                       initially="DEFERRED",
-                                       ondelete='CASCADE'))
+    # Report hash.
+    bhash = Column(String)
 
-    start_bugevent = Column(Integer,
-                            ForeignKey('bug_path_events.id', deferrable=True,
-                                       initially="DEFERRED",
-                                       ondelete='CASCADE'), index=True)
-    end_bugevent = Column(Integer,
-                          ForeignKey('bug_path_events.id', deferrable=True,
-                                     initially="DEFERRED", ondelete='CASCADE'),
-                          index=True)
-    suppressed = Column(Boolean)
+    # Hash of the diagnostic path.
+    phash = Column(String)
 
-    # Cascade delete might remove rows SQLAlchemy warns about this
-    # to remove warnings about already deleted items set this to False.
-    __mapper_args__ = {
-        'confirm_deleted_rows': False
-    }
+    # Main report message provided by an analyzer.
+    msg = Column(String)
 
-    # Priority/severity etc...
-    def __init__(self, run_id, bug_id, file_id, checker_message,
-                 start_bugpoint, start_bugevent, end_bugevent, checker_id,
-                 checker_cat, bug_type, severity, suppressed):
-        self.run_id = run_id
-        self.file_id = file_id
-        self.bug_id = bug_id
-        self.checker_message = checker_message
-        self.start_bugpoint = start_bugpoint
-        self.start_bugevent = start_bugevent
-        self.end_bugevent = end_bugevent
-        self.severity = severity
-        self.checker_id = checker_id
-        self.checker_cat = checker_cat
-        self.suppressed = suppressed
-        self.bug_type = bug_type
+    # Analyzer checker name.
+    checker_name = Column(String)
 
+    # Checker category if available.
+    category = Column(String)
 
-class ReportsToBuildActions(Base):
-    __tablename__ = 'reports_to_build_actions'
+    # Report type if available.
+    report_type = Column(String)
 
-    report_id = Column(Integer, ForeignKey('reports.id', deferrable=True,
-                                           initially="DEFERRED",
-                                           ondelete='CASCADE'),
-                       primary_key=True)
-    build_action_id = Column(
-        Integer,
-        ForeignKey('build_actions.id', deferrable=True, initially="DEFERRED",
-                   ondelete='CASCADE'), primary_key=True)
+    def __init__(self, report_id, bhash, phash,
+                 checker_name, category,
+                 report_type, msg):
 
-    def __init__(self, report_id, build_action_id):
         self.report_id = report_id
-        self.build_action_id = build_action_id
+        self.bhash = bhash
+        self.phash = phash
+        self.checker_name = checker_name
+        self.category = category
+        self.report_type = report_type
+        self.msg = msg
 
 
-class SuppressBug(Base):
-    __tablename__ = 'suppress_bug'
+class ReportToTag(Base):
+    """
+    Assign a tag to a report.
+    """
 
-    id = Column(Integer, autoincrement=True, primary_key=True)
-    hash = Column(String, nullable=False)
-    file_name = Column(String)
-    run_id = Column(Integer,
-                    ForeignKey('runs.id', deferrable=True,
-                               initially="DEFERRED",
-                               ondelete='CASCADE'),
-                    nullable=False)
-    comment = Column(Binary)
-
-    def __init__(self, run_id, hash, file_name, comment):
-        self.hash, self.run_id = hash, run_id
-        self.comment = comment
-        self.file_name = file_name
-
-
-class SkipPath(Base):
-    __tablename__ = 'skip_path'
+    __tablename__ = 'report_to_tags'
 
     id = Column(Integer, autoincrement=True, primary_key=True)
-    path = Column(String)
-    run_id = Column(Integer,
-                    ForeignKey('runs.id', deferrable=True,
-                               initially="DEFERRED",
-                               ondelete='CASCADE'),
-                    nullable=False)
-    comment = Column(Binary)
+    report_id = Column(String,
+                       ForeignKey('reports.report_id',
+                                  deferrable=True,
+                                  initially="DEFERRED",
+                                  ondelete='CASCADE'))
 
-    def __init__(self, run_id, path, comment):
-        self.path = path
-        self.run_id = run_id
+    tagid = Column(Integer, ForeignKey('tags.id'), nullable=False) 
+
+    def __init__(self, report_id, tagid):
+        self.report_id = report_id
+        self.tagid = tagid
+
+
+class ReportComment(Base):
+    """
+    Additional comments can be added to each report
+    by automated tools or bby the users.
+    """
+
+    __tablename__ = 'report_comments'
+
+    id = Column(Integer, autoincrement=True, primary_key=True)
+    report_id = Column(String,
+                       ForeignKey('reports.report_id',
+                                  deferrable=True,
+                                  initially="DEFERRED",
+                                  ondelete='CASCADE'))
+
+    # Comments like: label added, first detected or comment by user
+    comment = Column(String)
+    date = Column(DateTime)
+    comment_by = Column(String)
+
+    def __init__(self, report_id, comment, comment_by):
+        self.report_id = report_id
+        self.comment = comment
+        self.comment_by = comment_by
+        self.date = datetime.now()
+
+
+class Suppress(Base):
+    """
+    Suppression information for the reports.
+    """
+
+    __tablename__ = 'suppresses'
+
+    id = Column(Integer, autoincrement=True, primary_key=True)
+    report_id = Column(String,
+                       ForeignKey('reports.report_id',
+                                  deferrable=True,
+                                  initially="DEFERRED",
+                                  ondelete='CASCADE'))
+    comment = Column(String)
+
+    def __init__(self, report_id, filename, comment):
+        self.report_id = report_id
         self.comment = comment
 
+    def set_comment(self, comment):
+        self.comment = comment
+
+
+class Tag(Base):
+    """
+    Special tags like severity or suppress should be filled up
+    automatically.
+
+    Severity levels are handled as tags: 'high', 'low', 'style' ...
+
+    Suppress as tag: 'suppressed'
+
+    Additional custom tags by the user.
+
+    Tag kind: issue, run, none ...
+     * issue: can be applied only to issues
+     * run: can be applied only to runs (nightly, CI results ...)
+     * vrun: virtual run special tag to group runs together
+
+    """
+
+    __tablename__ = 'tags'
+
+    id = Column(Integer, autoincrement=True, primary_key=True)
+    name = Column(String)
+
+    kind = Column(String)
+
+    def __init__(self, name, kind):
+        self.name = name
+        self.kind = kind
 
 # End of ORM classes.
 
 
 def CreateSchema(engine):
-    """ Creates the schema if it does not exists.
-        Do not check version or do migration yet. """
+    """
+    Creates the schema if it does not exists.
+    Do not check version or do migration yet.
+    """
     Base.metadata.create_all(engine)
 
 
 def CreateSession(engine):
-    """ Creates a scoped session factory that can act like a session.
-        The factory uses a thread_local registry, so every thread have
-        its own session. """
+    """
+    Creates a scoped session factory that can act like a session.
+    The factory uses a thread_local registry, so every thread have
+    its own session.
+    """
     SessionFactory = scoped_session(sessionmaker(bind=engine))
     return SessionFactory

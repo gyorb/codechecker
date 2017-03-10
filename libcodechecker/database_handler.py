@@ -27,6 +27,7 @@ from libcodechecker import logger
 from libcodechecker import pgpass
 from libcodechecker import util
 from libcodechecker.logger import LoggerFactory
+from libcodechecker import orm_model
 from libcodechecker.orm_model import CC_META
 from libcodechecker.orm_model import CreateSession
 from libcodechecker.orm_model import DBVersion
@@ -76,20 +77,23 @@ class SQLServer(object):
             db_uri = self.get_connection_string()
             engine = SQLServer.create_engine(db_uri)
 
-            LOG.debug('Update/create database schema')
-            if use_migration:
-                LOG.debug('Creating new database session')
-                session = CreateSession(engine)
-                connection = session.connection()
+            #LOG.debug('Update/create database schema')
+            #if use_migration:
+            #    LOG.debug('Creating new database session')
+            #    session = CreateSession(engine)
+            #    connection = session.connection()
 
-                cfg = config.Config()
-                cfg.set_main_option("script_location", self.migration_root)
-                cfg.attributes["connection"] = connection
-                command.upgrade(cfg, "head")
+            #    cfg = config.Config()
+            #    cfg.set_main_option("script_location", self.migration_root)
+            #    cfg.attributes["connection"] = connection
+            #    command.upgrade(cfg, "head")
 
-                session.commit()
-            else:
-                CC_META.create_all(engine)
+            #    session.commit()
+            #else:
+            #    CC_META.create_all(engine)
+
+            # just create a schema
+            orm_model.CreateSchema(engine)
 
             engine.dispose()
             LOG.debug('Update/create database schema done')

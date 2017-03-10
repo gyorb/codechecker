@@ -13,24 +13,17 @@ struct NeedFileResult {
                 2: i64 fileId;
 }
 
-struct SuppressBugData {
-    1: string bug_hash,
-    2: string file_name,
-    3: string comment
-}
-typedef list<SuppressBugData> SuppressBugList
 
 // The order of the functions inditaces the order that must be maintained when
 // calling into the server.
 service CheckerReport {
                 // store checker run related data to the database
-                // by default updates the results if name was already found
-                // using the force flag removes existing analysis results for a run
+                // by default updates the run information if name was already found
                 i64  addCheckerRun(
                                    1: string command,
                                    2: string name,
                                    3: string version,
-                                   4: bool force)
+                                   4: string start_date)
                                    throws (1: shared.RequestFailed requestError),
 
                 bool replaceConfigInfo(
@@ -38,15 +31,13 @@ service CheckerReport {
                                    2: shared.CheckerConfigList values)
                                    throws (1: shared.RequestFailed requestError),
 
-                bool addSuppressBug(
-                                    1: i64 run_id,
-                                    2: SuppressBugList bugsToSuppress
-                                    )
+                # FIXME move to shared service
+                bool suppressReport(1: shared.SuppressReportList reportToSuppress)
                                     throws (1: shared.RequestFailed requestError),
 
-                # remove all suppress information from the database
-                bool cleanSuppressData(
-                                    1: i64 run_id,
+                # FIXME move to shared service
+                bool unsuppressReport(
+                                    1: string report_id,
                                     )
                                     throws (1: shared.RequestFailed requestError),
 
@@ -56,47 +47,65 @@ service CheckerReport {
                                  2: map<string, string> paths)
                                  throws (1: shared.RequestFailed requestError),
 
+                bool storeTag(1: string name,
+                              2: string kind)
+                              throws (1: shared.RequestFailed requestError),
+
+                bool deleteTag(1: string name)
+                               throws (1: shared.RequestFailed requestError),
+ 
+                # FIXME this should be the tag id not tag name
+                # clients should check for valid tags
+                bool addTagToIssue(1: string tag_name,
+                                   2: string report_id)
+                                   throws (1: shared.RequestFailed requestError),
+
+                bool removeTagFromIssue(1: i64 tag_id,
+                                        2: string ihash)
+                            throws (1: shared.RequestFailed requestError),
+
+                bool addToRun(1: i64 run_id,
+                              2: string bug_hash)
+                              throws (1: shared.RequestFailed requestError),
 
                 // The next few following functions must be called via the same connection.
                 // =============================================================
-                i64  addBuildAction(
+                string storeAnalysisAction(
                                     1: i64 run_id,
-                                    2: string build_cmd_hash,
-                                    3: string check_cmd,
-                                    4: string analyzer_type,
-                                    5: string analyzed_source_file)
+                                    2: string analysis_cmd,
+                                    3: string analyzer_type,
+                                    4: string analyzed_source_file,
+                                    5: string msg)
                                     throws (1: shared.RequestFailed requestError),
 
-                i64  addReport(
-                               1: i64 build_action_id,
-                               2: i64 file_id,
-                               3: string bug_hash,
-                               4: string checker_message,
-                               5: shared.BugPath bugpath,
-                               6: shared.BugPathEvents events,
-                               7: string checker_id,
-                               8: string checker_cat,
-                               9: string bug_type,
-                               10: shared.Severity severity,
-                               11: bool suppress)
+                bool storeCompilationAction(
+                                    1: i64 run_id,
+                                    2: string compilation_cmd_id,
+                                    3: string compilation_cmd)
+                                    throws (1: shared.RequestFailed requestError),
+
+                bool addReport(
+                               1: shared.Report report)
                                throws (1: shared.RequestFailed requestError),
 
-                bool finishBuildAction(
-                                       1: i64 action_id,
-                                       2: string failure)
-                                       throws (1: shared.RequestFailed requestError),
 
-                NeedFileResult needFileContent(
-                                               1: i64 run_id,
-                                               2: string filepath)
+                bool storeReportComment(
+                                        1: string report_id,
+                                        2: string comment,
+                                        3: string comment_by)
+                                        throws (1: shared.RequestFailed requestError),
+
+                bool needFileContent(1: string source_file_hash)
                                                throws (1: shared.RequestFailed requestError),
 
                 bool addFileContent(
-                                    1: i64 file_id,
-                                    2: binary file_content)
+                                    1: string file_content_hash,
+                                    2: string filepath,
+                                    3: binary file_content)
                                     throws (1: shared.RequestFailed requestError),
 
-                bool finishCheckerRun(1: i64 run_id)
+                bool finishCheckerRun(1: i64 run_id,
+                                      2: string finish_date)
                                       throws (1: shared.RequestFailed requestError),
 
                 bool stopServer()

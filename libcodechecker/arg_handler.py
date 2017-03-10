@@ -17,6 +17,8 @@ import socket
 import sys
 import tempfile
 
+from datetime import datetime
+
 from libcodechecker import client
 from libcodechecker import debug_reporter
 from libcodechecker import generic_package_context
@@ -420,7 +422,8 @@ def handle_plist(args):
             context.run_id = connection.add_checker_run(' '.join(sys.argv),
                                                         args.name,
                                                         context.version,
-                                                        args.force)
+                                                        str(datetime.now()))
+
 
     pool = multiprocessing.Pool(args.jobs)
 

@@ -62,8 +62,8 @@ class SourceSuppressHandler(object):
         """
         Source line number indexing starts at 1.
         """
-        source_file = bug.file_path
-        last_bug_event = bug.events()[-1]
+        source_file = bug.main_section.start_pos.file_path
+        last_bug_event = bug.main_section
         bug_line = last_bug_event.start_pos.line
 
         self.__source_file = source_file
