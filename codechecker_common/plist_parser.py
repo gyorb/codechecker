@@ -39,6 +39,7 @@ import os
 import plistlib
 import sys
 import traceback
+import StringIO
 from xml.parsers.expat import ExpatError
 
 from codechecker_common import util
@@ -77,6 +78,79 @@ def get_report_hash(diagnostic, source_file):
                                    source_file,
                                    get_checker_name(diagnostic))
     return report_hash
+
+
+def parse_plist2(path, source_root=None, allow_plist_update=True):
+    """
+    Parse the reports from a plist file.
+    One plist file can contain multiple reports.
+    """
+    reports = []
+    files = []
+    try:
+        plist = plistlib.readPlist(StringIO.StringIO(path))
+
+        files = plist['files']
+
+        diag_changed = False
+        for diag in plist['diagnostics']:
+
+            available_keys = diag.keys()
+
+            main_section = {}
+            for key in available_keys:
+                # Skip path it is handled separately.
+                if key != 'path':
+                    main_section.update({key: diag[key]})
+
+            # We need to extend information for plist files generated
+            # by older clang version (before 3.7).
+            main_section['check_name'] = get_checker_name(diag, path)
+
+            # We need to extend information for plist files generated
+            # by older clang version (before 3.8).
+            file_path = files[diag['location']['file']]
+            if source_root:
+                file_path = os.path.join(source_root, file_path.lstrip('/'))
+
+            report_hash = get_report_hash(diag, file_path)
+            main_section['issue_hash_content_of_line_in_context'] = \
+                report_hash
+
+            if 'issue_hash_content_of_line_in_context' not in diag:
+                # If the report hash was not in the plist, we set it in the
+                # diagnostic section for later update.
+                diag['issue_hash_content_of_line_in_context'] = report_hash
+                diag_changed = True
+
+            bug_path_items = [item for item in diag['path']]
+
+            report = Report(main_section, bug_path_items, files)
+            reports.append(report)
+
+        if diag_changed and allow_plist_update:
+            # If the diagnostic section has changed we update the plist file.
+            # This way the client will always send a plist file where the
+            # report hash field is filled.
+            plistlib.writePlist(plist, path)
+    except (ExpatError, TypeError, AttributeError) as err:
+        LOG.warning('Failed to process plist file: %s wrong file format?',
+                    path)
+        LOG.warning(err)
+    except IndexError as iex:
+        LOG.warning('Indexing error during processing plist file %s', path)
+        LOG.warning(type(iex))
+        LOG.warning(repr(iex))
+        _, _, exc_traceback = sys.exc_info()
+        traceback.print_tb(exc_traceback, limit=1, file=sys.stdout)
+    except Exception as ex:
+        LOG.warning('Error during processing reports from the plist file: %s',
+                    path)
+        traceback.print_exc()
+        LOG.warning(type(ex))
+        LOG.warning(ex)
+    finally:
+        return files, reports
 
 
 def parse_plist(path, source_root=None, allow_plist_update=True):

@@ -185,8 +185,6 @@ class SourceCodeCommentHandler(object):
         for a bug line.
         """
         source_file = self.__source_file
-        LOG.debug("Checking for source code comments in the source file '%s'"
-                  "at line %s", self.__source_file, bug_line)
 
         previous_line_num = bug_line - 1
 

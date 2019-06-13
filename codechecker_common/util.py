@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+import StringIO
 
 from threading import Timer
 
@@ -224,18 +225,21 @@ def get_line(file_name, line_no, errors='ignore'):
 
     Changing the encoding error handling can influence the hash content!
     """
-    try:
-        with io.open(file_name, mode='r',
-                     encoding='utf-8',
-                     errors=errors) as source_file:
-            for line in source_file:
-                line_no -= 1
-                if line_no == 0:
-                    return line
+    if isinstance(file_name, StringIO.StringIO):
+        return file_name.read().splitlines()[line_no]
+    else:
+        try:
+            with io.open(file_name, mode='r',
+                         encoding='utf-8',
+                         errors=errors) as source_file:
+                for line in source_file:
+                    line_no -= 1
+                    if line_no == 0:
+                        return line
+                return u''
+        except IOError:
+            LOG.error("Failed to open file %s", file_name)
             return u''
-    except IOError:
-        LOG.error("Failed to open file %s", file_name)
-        return u''
 
 
 def load_json_or_empty(path, default=None, kind=None, lock=False):

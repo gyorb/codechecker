@@ -6,56 +6,59 @@
 """
 Handle Thrift requests.
 """
-from __future__ import print_function
-from __future__ import division
-from __future__ import absolute_import
+from __future__ import absolute_import, division, print_function
 
 import base64
 import codecs
-from collections import defaultdict
-from datetime import datetime, timedelta
 import io
+import json
 import os
 import re
+import StringIO
 import tempfile
 import zipfile
 import zlib
+from collections import defaultdict
+from datetime import datetime, timedelta
 
 import sqlalchemy
-from sqlalchemy.sql.expression import or_, and_, not_, func, \
-    asc, desc, text, union_all, select, bindparam, literal_column, cast
+from sqlalchemy.sql.expression import (and_, asc, bindparam, cast, desc, func,
+                                       literal_column, not_, or_, select, text,
+                                       union_all)
 
 import shared
-from codeCheckerDBAccess_v6 import constants, ttypes
-from codeCheckerDBAccess_v6.ttypes import BugPathPos, CheckerCount, \
-    CommentData, DiffType, Encoding, RunHistoryData, Order, ReportData, \
-    ReportDetails, ReviewData, RunData, RunReportCount, RunTagCount, \
-    SourceComponentData, SourceFileData, SortMode, SortType
-
-from codechecker_common import plist_parser, skiplist_handler
-from codechecker_common.source_code_comment_handler import \
-    SourceCodeCommentHandler, SKIP_REVIEW_STATUSES
-from codechecker_common import util
+from codechecker_common import plist_parser, skiplist_handler, util
 from codechecker_common.logger import get_logger
 from codechecker_common.profiler import timeit
 from codechecker_common.report import get_report_path_hash
+from codechecker_common.source_code_comment_handler import SKIP_REVIEW_STATUSES
+from codechecker_common.source_code_comment_handler \
+    import SourceCodeCommentHandler
 
+from codeCheckerDBAccess_v6 import constants, ttypes
+from codeCheckerDBAccess_v6.ttypes import (BugPathPos, CheckerCount,
+                                           CommentData, DiffType, Encoding,
+                                           Order, ReportData, ReportDetails,
+                                           ReviewData, RunData, RunHistoryData,
+                                           RunReportCount, RunTagCount,
+                                           SortMode, SortType,
+                                           SourceComponentData, SourceFileData)
+
+from . import store_handler
 from .. import permissions
 from ..database import db_cleanup
 from ..database.config_db_model import Product
 from ..database.database import conv
-from ..database.run_db_model import \
-    AnalyzerStatistic, Report, ReviewStatus, File, Run, RunHistory, \
-    RunLock, Comment, BugPathEvent, BugReportPoint, \
-    FileContent, SourceComponent, ExtendedReportData
+from ..database.run_db_model import (AnalyzerStatistic, BugPathEvent,
+                                     BugReportPoint, Comment,
+                                     ExtendedReportData, File, FileContent,
+                                     Report, ReviewStatus, Run, RunHistory,
+                                     RunLock, SourceComponent)
 from ..tmp import TemporaryDirectory
-
 from .db import DBSession, escape_like
-from .thrift_enum_helper import detection_status_enum, \
-    detection_status_str, review_status_enum, review_status_str, \
-    report_extended_data_type_enum
-
-from . import store_handler
+from .thrift_enum_helper import (detection_status_enum, detection_status_str,
+                                 report_extended_data_type_enum,
+                                 review_status_enum, review_status_str)
 
 LOG = get_logger('server')
 
@@ -97,6 +100,8 @@ def exc_to_thrift_reqfail(func):
         except Exception as ex:
             msg = str(ex)
             LOG.warning(msg)
+            import traceback
+            traceback.print_stack()
             raise shared.ttypes.RequestFailed(shared.ttypes.ErrorCode.GENERAL,
                                               msg)
 
@@ -398,7 +403,7 @@ def unzip(b64zip, output_dir):
         zip_file.write(zlib.decompress(base64.b64decode(b64zip)))
         with zipfile.ZipFile(zip_file, 'r', allowZip64=True) as zipf:
             try:
-                zipf.extractall(output_dir)
+                return {name: zipf.read(name) for name in zipf.namelist()}
             except Exception:
                 LOG.error("Failed to extract received ZIP.")
                 import traceback
@@ -2107,8 +2112,8 @@ class ThriftRequestHandler(object):
             return list(set(file_hashes) -
                         set(map(lambda fc: fc.content_hash, q)))
 
-    def __store_source_files(self, source_root, filename_to_hash,
-                             trim_path_prefixes):
+    def __store_source_files(self, filename_to_hash,
+                             trim_path_prefixes, res):
         """
         Storing file contents from plist.
         """
@@ -2116,14 +2121,16 @@ class ThriftRequestHandler(object):
         file_path_to_id = {}
 
         for file_name, file_hash in filename_to_hash.items():
-            source_file_name = os.path.join(source_root,
-                                            file_name.strip("/"))
-            source_file_name = os.path.realpath(source_file_name)
-            LOG.debug("Storing source file: %s", source_file_name)
+            LOG.debug("filename: %s file hash %s", file_name, file_hash)
+            source_file_name = file_name
+            LOG.debug("Storing source file: %s", file_name)
             trimmed_file_path = util.trim_path_prefixes(file_name,
                                                         trim_path_prefixes)
 
-            if not os.path.isfile(source_file_name):
+            file_path_in_zip = 'root'+file_name
+
+            file_content = res.get(file_path_in_zip)
+            if not file_content:
                 # The file was not in the ZIP file, because we already
                 # have the content. Let's check if we already have a file
                 # record in the database or we need to add one.
@@ -2137,25 +2144,27 @@ class ThriftRequestHandler(object):
                     LOG.error("File ID for %s is not found in the DB with "
                               "content hash %s. Missing from ZIP?",
                               source_file_name, file_hash)
-                file_path_to_id[file_name] = fid
-                LOG.debug("%d fileid found", fid)
+                else:
+                    file_path_to_id[file_name] = fid
+                    LOG.debug("%d fileid found", fid)
                 continue
 
-            with codecs.open(source_file_name, 'r',
-                             'UTF-8', 'replace') as source_file:
-                file_content = source_file.read()
-                file_content = codecs.encode(file_content, 'utf-8')
+            # file_content is str instead of unicode that is why we need this
+            # etra step.
+            file_content = codecs.decode(file_content, 'utf8', 'replace')
 
-                with DBSession(self.__Session) as session:
-                    file_path_to_id[file_name] = \
-                        store_handler.addFileContent(session,
-                                                     trimmed_file_path,
-                                                     file_content,
-                                                     file_hash,
-                                                     None)
+            file_content = codecs.encode(file_content, 'utf8', 'replace')
+
+            with DBSession(self.__Session) as session:
+                file_path_to_id[file_name] = \
+                    store_handler.addFileContent(session,
+                                                 trimmed_file_path,
+                                                 file_content,
+                                                 file_hash,
+                                                 None)
         return file_path_to_id
 
-    def __store_reports(self, session, report_dir, source_root, run_id,
+    def __store_reports(self, session, zip_content, source_root, run_id,
                         file_path_to_id, run_history_time, severity_map,
                         wrong_src_code_comments, skip_handler,
                         checkers):
@@ -2200,17 +2209,14 @@ class ThriftRequestHandler(object):
             return not checker_name.startswith('clang-diagnostic-') and \
                 enabled_checkers and checker_name not in enabled_checkers
 
-        # Processing PList files.
-        _, _, report_files = next(os.walk(report_dir), ([], [], []))
-        for f in report_files:
+        for f, file_content in zip_content.items():
             if not f.endswith('.plist'):
                 continue
 
             LOG.debug("Parsing input file '%s'", f)
 
             try:
-                files, reports = plist_parser.parse_plist(
-                    os.path.join(report_dir, f), source_root)
+                files, reports = plist_parser.parse_plist2(file_content, None)
             except Exception as ex:
                 LOG.error('Parsing the plist failed: %s', str(ex))
                 continue
@@ -2274,11 +2280,17 @@ class ThriftRequestHandler(object):
 
                 last_report_event = report.bug_path[-1]
                 file_name = files[last_report_event['location']['file']]
-                source_file_name = os.path.realpath(
-                    os.path.join(source_root, file_name.strip("/")))
 
-                if os.path.isfile(source_file_name):
-                    sc_handler = SourceCodeCommentHandler(source_file_name)
+                LOG.debug("file_name")
+                LOG.debug(file_name)
+
+                source_file_content = zip_content.get('root'+file_name, '')
+
+                LOG.debug("source_file_content")
+                LOG.debug(source_file_content)
+
+                if source_file_content:
+                    sc_handler = SourceCodeCommentHandler(source_file_content)
 
                     report_line = last_report_event['location']['line']
                     source_file = os.path.basename(file_name)
@@ -2475,39 +2487,45 @@ class ThriftRequestHandler(object):
         wrong_src_code_comments = []
         try:
             with TemporaryDirectory() as zip_dir:
-                unzip(b64zip, zip_dir)
+                res = unzip(b64zip, zip_dir)
 
                 LOG.debug("Using unzipped folder '%s'", zip_dir)
 
                 source_root = os.path.join(zip_dir, 'root')
-                report_dir = os.path.join(zip_dir, 'reports')
-                metadata_file = os.path.join(report_dir, 'metadata.json')
-                skip_file = os.path.join(report_dir, 'skip_file')
-                content_hash_file = os.path.join(zip_dir,
-                                                 'content_hashes.json')
+
+                metadata_json_content = \
+                    StringIO.StringIO(res.get('reports/metadata.json', '{}'))
+                skip_file_content = \
+                    StringIO.StringIO(res.get('reports/skip_file', ''))
+                content_hash_file_content = \
+                    StringIO.StringIO(res.get('content_hashes.json', '{}'))
 
                 skip_handler = skiplist_handler.SkipListHandler()
-                if os.path.exists(skip_file):
-                    LOG.debug("Pocessing skip file %s", skip_file)
+                if skip_file_content:
                     try:
-                        with open(skip_file) as sf:
-                            skip_handler = \
-                                skiplist_handler.SkipListHandler(sf.read())
+                        skip_handler = \
+                            skiplist_handler.SkipListHandler(
+                                skip_file_content.read())
                     except (IOError, OSError) as err:
                         LOG.error("Failed to open skip file")
                         LOG.error(err)
 
-                filename_to_hash = util.load_json_or_empty(content_hash_file,
-                                                           {})
+                filename_to_hash = {}
+                try:
+                    filename_to_hash = json.loads(
+                        content_hash_file_content.read())
+                except Exception:
+                    LOG.error("content hash json load failed")
 
-                file_path_to_id = self.__store_source_files(source_root,
-                                                            filename_to_hash,
-                                                            trim_path_prefixes)
+                file_path_to_id = self.__store_source_files(filename_to_hash,
+                                                            trim_path_prefixes,
+                                                            res)
 
                 run_history_time = datetime.now()
 
                 check_commands, check_durations, cc_version, statistics, \
-                    checkers = store_handler.metadata_info(metadata_file)
+                    checkers = store_handler.metadata_info(
+                        metadata_json_content)
 
                 command = ''
                 if len(check_commands) == 1:
@@ -2551,9 +2569,9 @@ class ThriftRequestHandler(object):
                                                          force,
                                                          cc_version,
                                                          statistics)
-
+                    LOG.debug("storing reports")
                     self.__store_reports(session,
-                                         report_dir,
+                                         res,
                                          source_root,
                                          run_id,
                                          file_path_to_id,
@@ -2562,6 +2580,7 @@ class ThriftRequestHandler(object):
                                          wrong_src_code_comments,
                                          skip_handler,
                                          checkers)
+                    LOG.debug("storing done")
 
                     store_handler.setRunDuration(session,
                                                  run_id,

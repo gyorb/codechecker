@@ -15,14 +15,13 @@ from datetime import datetime
 from hashlib import sha256
 import os
 import zlib
-
+import json
 import sqlalchemy
 
 import shared
 from codeCheckerDBAccess_v6 import ttypes
 
 from codechecker_common.logger import get_logger
-from codechecker_common.util import load_json_or_empty
 
 from ..database.run_db_model import AnalyzerStatistic, \
     BugPathEvent, BugReportPoint, File, Run, RunHistory, Report, FileContent, \
@@ -40,11 +39,11 @@ def metadata_info(metadata_file):
     analyzer_statistics = {}
     checkers = {}
 
-    if not os.path.isfile(metadata_file):
+    if not metadata_file:
         return check_commands, check_durations, cc_version, \
                analyzer_statistics, checkers
 
-    metadata_dict = load_json_or_empty(metadata_file, {})
+    metadata_dict = json.loads(metadata_file.read())
 
     if 'command' in metadata_dict:
         check_commands.append(metadata_dict['command'])
@@ -555,6 +554,7 @@ def addFileRecord(session, filepath, content_hash):
         .filter(File.content_hash == content_hash,
                 File.filepath == filepath) \
         .one_or_none()
+
     if file_record:
         return file_record.id
     try:
@@ -569,5 +569,4 @@ def addFileRecord(session, filepath, content_hash):
         file_record = session.query(File) \
             .filter(File.content_hash == content_hash,
                     File.filepath == filepath).one_or_none()
-
     return file_record.id if file_record else None
