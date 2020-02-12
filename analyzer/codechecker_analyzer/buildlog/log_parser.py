@@ -1061,7 +1061,7 @@ def parse_options(compilation_db_entry,
                 filter(__contains_no_intrinsic_headers, includes)
 
         # filter out intrin directories
-        aop_without_itrin = []
+        aop_without_intrin = []
         analyzer_options = iter(details['analyzer_options'])
 
         for aopt in analyzer_options:
@@ -1078,15 +1078,15 @@ def parse_options(compilation_db_entry,
                 if os.path.isdir(value) and __contains_no_intrinsic_headers(
                         value) or not os.path.isdir(value):
                     if together:
-                        aop_without_itrin.append(aopt)
+                        aop_without_intrin.append(aopt)
                     else:
-                        aop_without_itrin.append(flag)
-                        aop_without_itrin.append(value)
+                        aop_without_intrin.append(flag)
+                        aop_without_intrin.append(value)
             else:
                 # no match
-                aop_without_itrin.append(aopt)
+                aop_without_intrin.append(aopt)
 
-        details['analyzer_options'] = aop_without_itrin
+        details['analyzer_options'] = aop_without_intrin
 
     return BuildAction(**details)
 
