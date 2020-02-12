@@ -467,7 +467,7 @@ class OptionParserTest(unittest.TestCase):
                                 res.compiler_includes['c++'])))
 
     def test_compiler_intrin_headers(self):
-        """ Inlcude directories with *intrin.h files should be skiped."""
+        """ Include directories with *intrin.h files should be skipped."""
 
         action = {
             'file': 'main.cpp',
