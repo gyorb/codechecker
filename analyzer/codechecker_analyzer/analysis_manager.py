@@ -111,17 +111,6 @@ def worker_result_handler(results, metadata_tool, output_path,
     metadata_tool['result_source_files'].update(source_map)
 
 
-# Progress reporting.
-progress_checked_num = None
-progress_actions = None
-
-
-def init_worker(checked_num, action_num):
-    global progress_checked_num, progress_actions
-    progress_checked_num = checked_num
-    progress_actions = action_num
-
-
 def save_output(base_file_name, out, err):
     try:
         if out:
@@ -456,7 +445,7 @@ def check(check_data):
         output_dir, skip_handler, quiet_output_on_stdout, \
         capture_analysis_output, analysis_timeout, \
         analyzer_environment, ctu_reanalyze_on_failure, \
-        output_dirs, statistics_data = check_data
+        output_dirs, statistics_data, checked_var, actions_num = check_data
 
     failed_dir = output_dirs["failed"]
     success_dir = output_dirs["success"]
@@ -556,7 +545,7 @@ def check(check_data):
                            skip_handler, capture_analysis_output,
                            success_dir)
             LOG.info("[%d/%d] %s analyzed %s successfully.",
-                     progress_checked_num.value, progress_actions.value,
+                     checked_var.value, actions_num.value,
                      action.analyzer_type, source_file_name)
 
             if result_file_exists:
@@ -608,8 +597,8 @@ def check(check_data):
 
                     LOG.info("[%d/%d] %s analyzed %s without"
                              " CTU successfully.",
-                             progress_checked_num.value,
-                             progress_actions.value,
+                             checked_var.value,
+                             actions_num.value,
                              action.analyzer_type,
                              source_file_name)
 
@@ -636,7 +625,8 @@ def check(check_data):
                 LOG.debug_analyzer('\n%s', rh.analyzer_stdout)
                 LOG.debug_analyzer('\n%s', rh.analyzer_stderr)
 
-        progress_checked_num.value += 1
+        with checked_var.get_lock():
+            checked_var.value += 1
 
         return return_codes, False, reanalyzed, action.analyzer_type, \
             result_file, action.source
@@ -692,10 +682,7 @@ def start_workers(actions_map, actions, context, analyzer_config_map,
     # Start checking parallel.
     checked_var = multiprocessing.Value('i', 1)
     actions_num = multiprocessing.Value('i', len(actions))
-    pool = multiprocessing.Pool(jobs,
-                                initializer=init_worker,
-                                initargs=(checked_var,
-                                          actions_num))
+    pool = multiprocessing.Pool(jobs)
 
     failed_dir = os.path.join(output_path, "failed")
     # If the analysis has failed, we help debugging.
@@ -727,7 +714,10 @@ def start_workers(actions_map, actions, context, analyzer_config_map,
                          analyzer_environment,
                          ctu_reanalyze_on_failure,
                          output_dirs,
-                         statistics_data)
+                         statistics_data,
+                         checked_var,
+                         actions_num
+                         )
                         for build_action in actions]
 
     if analyzed_actions:

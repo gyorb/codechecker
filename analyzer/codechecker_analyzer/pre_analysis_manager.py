@@ -69,26 +69,17 @@ def collect_statistics(action, source, config, environ, statistics_data):
     return ret_code
 
 
-# Progress reporting.
-progress_checked_num = None
-progress_actions = None
-
-
-def init_worker(checked_num, action_num):
-    global progress_checked_num, progress_actions
-    progress_checked_num = checked_num
-    progress_actions = action_num
-
 
 def pre_analyze(params):
 
     action, context, analyzer_config_map, skip_handler, \
-        ctu_data, statistics_data = params
+        ctu_data, statistics_data, processed_var, actions_num = params
 
     analyzer_environment = env.extend(context.path_env_extra,
                                       context.ld_lib_path_extra)
 
-    progress_checked_num.value += 1
+    with processed_var.get_lock():
+        processed_var.value += 1
 
     if skip_handler and skip_handler.should_skip(action.source):
         return
@@ -98,8 +89,8 @@ def pre_analyze(params):
     _, source_filename = os.path.split(action.source)
 
     LOG.info("[%d/%d] %s",
-             progress_checked_num.value,
-             progress_actions.value, source_filename)
+             processed_var.value,
+             actions_num.value, source_filename)
 
     config = analyzer_config_map.get(ClangSA.ANALYZER_NAME)
 
@@ -163,10 +154,7 @@ def run_pre_analysis(actions, context, analyzer_config_map,
     processed_var = multiprocessing.Value('i', 0)
     actions_num = multiprocessing.Value('i', len(actions))
 
-    pool = multiprocessing.Pool(jobs,
-                                initializer=init_worker,
-                                initargs=(processed_var,
-                                          actions_num))
+    pool = multiprocessing.Pool(jobs)
 
     if statistics_data:
         # Statistics collection is enabled setup temporary
@@ -188,7 +176,9 @@ def run_pre_analysis(actions, context, analyzer_config_map,
                             analyzer_config_map,
                             skip_handler,
                             ctu_data,
-                            statistics_data)
+                            statistics_data,
+                            processed_var,
+                            actions_num)
                            for build_action in actions]
 
         pool.map_async(pre_analyze, collect_actions)
